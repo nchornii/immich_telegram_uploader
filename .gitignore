@@ -1,0 +1,5 @@
+.env
+downloads
+.venv
+.idea
+*.session
