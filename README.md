@@ -1,6 +1,17 @@
 # Telegram → Immich Uploader
 
-Downloads photos and videos from a Telegram chat or channel and uploads them to your self-hosted [Immich](https://immich.app) instance.
+https://github.com/nchornii/immich_telegram_uploader/raw/main/assets/demo.mov
+
+Downloads photos, videos, and circle messages from a Telegram chat or channel and uploads them to your self-hosted [Immich](https://immich.app) instance.
+
+## Features
+
+- Upload **photos** from any Telegram chat or channel to Immich
+- Upload **videos** from any Telegram chat or channel to Immich
+- Upload **circle messages** (video notes) from Telegram to Immich
+- Optionally create **Immich albums** named after the Telegram chat or channel
+- Works with both **private chats** and **channels**
+- Skips duplicate files using SHA-1 checksum verification
 
 ## Requirements
 
@@ -11,13 +22,13 @@ Downloads photos and videos from a Telegram chat or channel and uploads them to 
 ## Installation
 
 ```bash
-git clone <repo-url>
-cd PythonProject
+git clone https://github.com/nchornii/immich_telegram_uploader.git
+cd immich_telegram_uploader
 
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ## Configuration
