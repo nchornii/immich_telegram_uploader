@@ -1,6 +1,6 @@
 # Telegram → Immich Uploader
 
-<video src="https://github.com/nchornii/immich_telegram_uploader/raw/main/assets/demo.mov" controls autoplay loop muted playsinline width="100%"></video>
+<video src="./assets/demo.mp4" controls autoplay loop muted playsinline width="100%"></video>
 
 Downloads photos, videos, and circle messages from a Telegram chat or channel and uploads them to your self-hosted [Immich](https://immich.app) instance.
 
