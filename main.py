@@ -1,14 +1,20 @@
 import hashlib
 import os
 import sys
+import warnings
 from os.path import join, dirname
+
+# Suppress LibreSSL warning from urllib3 v2 on macOS (uses LibreSSL instead of OpenSSL)
+warnings.filterwarnings('ignore', message='.*NotOpenSSLWarning.*')
+warnings.filterwarnings('ignore', category=Warning, module='urllib3')
 from telethon import TelegramClient
-from telethon.tl.types import User, Channel, MessageMediaPhoto
+from telethon.tl.types import User, Channel, MessageMediaPhoto, MessageMediaDocument
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 import requests
 import datetime
 
+# Load environment variables from .env file
 dotenv_path = join(dirname(__file__), '.env')
 load_dotenv(dotenv_path)
 
@@ -18,184 +24,247 @@ session_name = os.environ.get('SESSION_NAME')
 immich_server_url = os.environ.get('IMMICH_API_URL')
 immich_api_key = os.environ.get('IMMICH_API_KEY')
 
-# === Output folders ===
+# Ensure local download folders exist
 os.makedirs("downloads/photos", exist_ok=True)
 os.makedirs("downloads/videos", exist_ok=True)
 
 
+# ──────────────────────────────────────────────
+#  Immich helpers
+# ──────────────────────────────────────────────
+
+def send_immich_request(method, endpoint, headers=None, data=None, files=None, json=None):
+    """Make an authenticated HTTP request to the Immich API."""
+    immich_parsed_url = urlparse(immich_server_url)
+    base_url = f'{immich_parsed_url.scheme}://{immich_parsed_url.netloc}'
+    api_url = f'{base_url}/api/{endpoint}'
+
+    if headers is None:
+        headers = {}
+    headers.setdefault('x-api-key', immich_api_key)
+
+    return requests.request(method, api_url, headers=headers, data=data, files=files, json=json)
+
+
+def sha1(file_path):
+    """Return the SHA-1 hex digest of a file (used as Immich upload checksum)."""
+    with open(file_path, "rb") as f:
+        return hashlib.sha1(f.read()).hexdigest()
+
+
 def create_album(name):
-    # Get all existing albums
+    """Return the ID of an existing album by name, or create a new one."""
     response = send_immich_request('GET', 'albums')
     albums = response.json()
-    
-    # Check if album with this name already exists
+
     for album in albums:
         if album['albumName'] == name:
-            print(f"Album '{name}' already exists with ID: {album['id']}")
+            print(f" Album already exists: '{name}'")
             return album['id']
-    
-    # Album doesn't exist, create a new one
-    print(f"Album '{name}' not found. Creating new album...")
+
+    print(f" Creating album '{name}'...")
     create_response = send_immich_request('POST', 'albums', json={'albumName': name})
     new_album = create_response.json()
-    print(f"Album '{name}' created with ID: {new_album['id']}")
+    print(f" Album created: '{name}'")
     return new_album['id']
 
 
 def add_assets_to_album(album_id, asset_ids):
-    """
-    Add multiple assets to an album.
-    
-    Args:
-        album_id: The ID of the album
-        asset_ids: List of asset IDs to add to the album
-    """
-    payload = {'assetIds': asset_ids, "albumIds": [album_id]}
-    response = send_immich_request('PUT', f'albums/assets', json=payload)
-    return response.json()
-
-
-async def save_media(channel_id, is_create_album: bool):
-    channel = await client.get_entity(channel_id)
-    
-    # List to store uploaded asset IDs
-    asset_ids = []
-    
-    album_id = None
-    if is_create_album:
-        album_id = create_album(channel.title)
-
-    async for message in client.iter_messages(channel, limit=None):
-        if message.media:
-            # === Photos ===
-            if isinstance(message.media, MessageMediaPhoto):
-                file_path = await message.download_media(file="downloads/photos/")
-                asset_id = upload_file_to_immich(file_path)
-                
-                # Add asset ID to the list if upload was successful
-                if asset_id:
-                    asset_ids.append(asset_id)
-                
-                print(f"Saved photo: {file_path}")
-    
-    # After all uploads, add assets to album if album was created
-    if is_create_album and album_id and asset_ids:
-        print(f"\nAdding {len(asset_ids)} assets to album...")
-        add_assets_to_album(album_id, asset_ids)
-
-
-def sha1(file_path):
-    with open(file_path, "rb") as f:
-        file_hash = hashlib.sha1(f.read()).hexdigest()
-    return file_hash
-
-
-def send_immich_request(method, endpoint, headers=None, data=None, files=None, json=None):
-    """
-    Method for making API calls to Immich server.
-    
-    Args:
-        method: HTTP method (GET, POST, PUT, DELETE, etc.)
-        endpoint: API endpoint path (e.g., '/api/assets', '/api/albums')
-        headers: Optional dictionary of HTTP headers
-        data: Optional form data
-        files: Optional files for multipart upload
-        json: Optional JSON payload
-    
-    Returns:
-        Response object from the request
-    """
-    immich_parsed_url = urlparse(immich_server_url)
-    base_url = f'{immich_parsed_url.scheme}://{immich_parsed_url.netloc}'
-    api_url = f'{base_url}/api/{endpoint}'
-    
-    # Add API key to headers if not already present
-    if headers is None:
-        headers = {}
-    if 'x-api-key' not in headers:
-        headers['x-api-key'] = immich_api_key
-    
-    response = requests.request(method, api_url, headers=headers, data=data, files=files, json=json)
-    return response
+    """Add a list of asset IDs to an album."""
+    payload = {'assetIds': asset_ids, 'albumIds': [album_id]}
+    return send_immich_request('PUT', 'albums/assets', json=payload).json()
 
 
 def upload_file_to_immich(file_path):
-    print(file_path)
+    """Upload a single file to Immich and return its asset ID."""
+    filename = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    print(f"Uploading  {filename} ({_human_size(file_size)})...", end='', flush=True)
+
     payload = {
-        'deviceId': 1,
-        'deviceAssetId': 1,
+        'deviceId': 'telegram-uploader',
+        'deviceAssetId': sha1(file_path),
         'fileCreatedAt': datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d %H:%M:%S"),
         'fileModifiedAt': datetime.datetime.fromtimestamp(os.path.getctime(file_path)).strftime("%Y-%m-%d %H:%M:%S"),
-        'filename': os.path.basename(file_path)
+        'filename': filename,
     }
-    files = [
-        ('assetData', open(file_path, 'rb'))
-    ]
+    files = [('assetData', open(file_path, 'rb'))]
     headers = {
         'Accept': 'application/json',
-        'x-immich-checksum': sha1(file_path)
+        'x-immich-checksum': sha1(file_path),
     }
+
     response = send_immich_request('POST', 'assets', headers=headers, data=payload, files=files)
     os.remove(file_path)
-    
-    response_data = response.json()
-    print(response_data)
-    
-    # Return the asset ID from the response
-    return response_data.get('id')
 
+    asset_id = response.json().get('id')
+    print(f"\r Uploaded   {filename}                          ")
+    return asset_id
+
+
+# ──────────────────────────────────────────────
+#  Telegram helpers
+# ──────────────────────────────────────────────
+
+# Tracks the filename being downloaded so the progress bar can show it
+_current_download_filename = ''
+
+
+def download_progress_callback(current, total):
+    """Print a single-line progress bar that updates in place during download."""
+    if total:
+        filled = int(20 * current / total)
+        bar = '█' * filled + '░' * (20 - filled)
+        pct = current / total * 100
+        print(
+            f"\rDownloading {_current_download_filename} [{bar}] {pct:5.1f}%"
+            f"  {_human_size(current)}/{_human_size(total)}   ",
+            end='',
+            flush=True,
+        )
+
+
+def _human_size(num_bytes):
+    """Convert a byte count to a human-readable string (KB / MB)."""
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.1f} MB"
+
+
+async def save_media(channel_id, name, is_create_album: bool):
+    """Download all media from a channel/chat and upload each file to Immich."""
+    global _current_download_filename
+
+    channel = await client.get_entity(channel_id)
+
+    print(f"\nScanning messages in '{name}'...", end='', flush=True)
+
+    # First pass: count total media messages
+    total_media = 0
+    async for message in client.iter_messages(channel, limit=None):
+        if message.media and isinstance(message.media, (MessageMediaPhoto, MessageMediaDocument)):
+            total_media += 1
+    print(f" found {total_media} media file(s).\n")
+
+    album_id = None
+    if is_create_album:
+        album_id = create_album(name)
+        print()
+
+    asset_ids = []
+    media_count = 0
+
+    async for message in client.iter_messages(channel, limit=None):
+        if not message.media:
+            continue
+
+        # Determine download folder by media type
+        if isinstance(message.media, MessageMediaPhoto):
+            path = 'downloads/photos/'
+            media_type = 'photo'
+        elif isinstance(message.media, MessageMediaDocument):
+            path = 'downloads/videos/'
+            media_type = 'video'
+        else:
+            continue
+
+        media_count += 1
+        print(f"[{media_count}/{total_media}] {media_type.capitalize()}  (msg id {message.id})")
+
+        # Download – progress shown via callback
+        _current_download_filename = f"msg_{message.id}"
+        file_path = await message.download_media(
+            file=path,
+            progress_callback=download_progress_callback,
+        )
+        print()  # newline after the progress bar
+
+        if not file_path:
+            print("Download returned no file, skipping.\n")
+            continue
+
+        _current_download_filename = os.path.basename(file_path)
+
+        # Upload to Immich
+        asset_id = upload_file_to_immich(file_path)
+        if asset_id:
+            asset_ids.append(asset_id)
+
+        print()
+
+    print(f"Processed {media_count} media file(s).")
+
+    # Bulk-add all uploaded assets to the album
+    if is_create_album and album_id and asset_ids:
+        print(f"\nAdding {len(asset_ids)} asset(s) to album...")
+        add_assets_to_album(album_id, asset_ids)
+        print("Album updated.")
+
+
+# ──────────────────────────────────────────────
+#  Interactive menu
+# ──────────────────────────────────────────────
 
 async def list_channels(dialog_type):
+    """List dialogs of the given type, prompt user to pick one, then start upload."""
     dialogs = await client.get_dialogs()
-
     dialog_list = [d for d in dialogs if isinstance(d.entity, dialog_type)]
 
+    print()
     for i, chat in enumerate(dialog_list, start=1):
         entity = chat.entity
-        print(f"{i} - {entity.id} | {entity.title} (@{entity.username or 'no_username'})")
+        # Channels/groups have .title; User objects have first_name/last_name
+        if hasattr(entity, 'title'):
+            display_name = entity.title
+        else:
+            display_name = ' '.join(filter(None, [entity.first_name, entity.last_name]))
+        _current_title = display_name
+        print(f"  {i:>3}.  {display_name}  (@{entity.username or 'no_username'})")
+    print()
 
-    choice = int(input('Select id of chat: '))
+    choice = int(input('Select number: '))
+    if not (1 <= choice <= len(dialog_list)):
+        print("Invalid choice.")
+        return
 
-    if 1 <= choice <= len(dialog_list):
-        selected = dialog_list[choice - 1]
-        print(f"You selected: {selected.entity.id}")
-        
-        while True:
-            create_album_input = input("Create album? (yes/no): ").strip().lower()
-            if create_album_input in ['yes', 'y']:
-                create_album = True
-                break
-            elif create_album_input in ['no', 'n']:
-                create_album = False
-                break
-            else:
-                print("Invalid input. Please enter 'yes' or 'no'.")
-        
-        await save_media(selected.entity.id, create_album)
+    selected = dialog_list[choice - 1]
+    if hasattr(selected.entity, 'title'):
+        display_name = selected.entity.title
     else:
-        print("Invalid choice!")
+        display_name = ' '.join(filter(None, [selected.entity.first_name, selected.entity.last_name]))
+    print(f"\nSelected: {display_name}")
+
+    # Ask whether to create an Immich album
+    while True:
+        answer = input("Create Immich album for this chat? (yes/no): ").strip().lower()
+        if answer in ('yes', 'y'):
+            create_album_flag = True
+            break
+        elif answer in ('no', 'n'):
+            create_album_flag = False
+            break
+        else:
+            print("  Please enter 'yes' or 'no'.")
+
+    await save_media(selected.entity.id, display_name, create_album_flag)
 
 
 async def main():
-    choice = input("Choose:\n1 - Private Chats\n2 - Channels\nYour choice: ")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("   Telegram → Immich Uploader")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    choice = input("\nChoose source:\n  1 - Private Chats\n  2 - Channels\nYour choice: ")
 
     if choice == '1':
-        type = User
+        dialog_type = User
     elif choice == '2':
-        type = Channel
+        dialog_type = Channel
     else:
-        sys.exit('Invalid choice')
+        sys.exit('Invalid choice.')
 
-    await list_channels(type)
-
-
-def test():
-    create_album('qwe')
-    # upload_file_to_immich('downloads/photos/photo_2025-08-29_21-03-28.jpg')
+    await list_channels(dialog_type)
+    print("\nDone!")
 
 
 with TelegramClient(session_name, api_id, api_hash) as client:
     client.loop.run_until_complete(main())
-
-# if __name__ == '__main__':
-#     test()
