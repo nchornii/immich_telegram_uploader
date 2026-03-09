@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import sys
@@ -7,6 +8,7 @@ from os.path import join, dirname
 # Suppress LibreSSL warning from urllib3 v2 on macOS (uses LibreSSL instead of OpenSSL)
 warnings.filterwarnings('ignore', message='.*NotOpenSSLWarning.*')
 warnings.filterwarnings('ignore', category=Warning, module='urllib3')
+warnings.filterwarnings('ignore', message='Using async sessions support is an experimental feature')
 from telethon import TelegramClient
 from telethon.tl.types import User, Channel, MessageMediaPhoto, MessageMediaDocument
 from dotenv import load_dotenv
@@ -42,8 +44,14 @@ def send_immich_request(method, endpoint, headers=None, data=None, files=None, j
     if headers is None:
         headers = {}
     headers.setdefault('x-api-key', immich_api_key)
+    headers.setdefault('Accept', 'application/json')
 
-    return requests.request(method, api_url, headers=headers, data=data, files=files, json=json)
+    response = requests.request(method, api_url, headers=headers, data=data, files=files, json=json)
+
+    if not response.ok:
+        raise RuntimeError(f"Immich API error [{response.status_code}] {endpoint}: {response.text}")
+
+    return response
 
 
 def sha1(file_path):
@@ -75,15 +83,56 @@ def add_assets_to_album(album_id, asset_ids):
     return send_immich_request('PUT', 'albums/assets', json=payload).json()
 
 
+def check_asset_exists(file_checksum):
+    """Check if an asset with the given SHA-1 checksum already exists in Immich.
+
+    Uses the bulk-upload-check endpoint which returns action 'reject' when the
+    asset is a duplicate, along with the existing asset ID.
+
+    Returns (exists: bool, asset_id: str | None).
+    """
+    payload = {'assets': [{'id': file_checksum, 'checksum': file_checksum}]}
+    response = send_immich_request('POST', 'assets/bulk-upload-check', json=payload)
+    results = response.json().get('results', [])
+    if results:
+        result = results[0]
+        if result.get('action') == 'reject':
+            return True, result.get('assetId')
+    return False, None
+
+
+# File extensions not supported by Immich (e.g. voice messages, stickers)
+UNSUPPORTED_EXTENSIONS = {'.oga', '.ogg', '.tgs', '.webp'}
+
+
 def upload_file_to_immich(file_path):
-    """Upload a single file to Immich and return its asset ID."""
+    """Check if file exists in Immich, skip if so, otherwise upload.
+
+    Returns the asset ID in both cases (existing or newly uploaded).
+    """
     filename = os.path.basename(file_path)
+    ext = os.path.splitext(filename)[1].lower()
+
+    if ext in UNSUPPORTED_EXTENSIONS:
+        print(f"  -- Skipped  {filename} (unsupported type '{ext}')")
+        os.remove(file_path)
+        return None
+
+    file_checksum = sha1(file_path)
+
+    # Check before uploading to avoid redundant transfers
+    exists, existing_asset_id = check_asset_exists(file_checksum)
+    if exists:
+        print(f"  -- Skipped  {filename} (already in Immich)")
+        os.remove(file_path)
+        return existing_asset_id
+
     file_size = os.path.getsize(file_path)
-    print(f"Uploading  {filename} ({_human_size(file_size)})...", end='', flush=True)
+    print(f"  Uploading  {filename} ({_human_size(file_size)})...", end='', flush=True)
 
     payload = {
         'deviceId': 'telegram-uploader',
-        'deviceAssetId': sha1(file_path),
+        'deviceAssetId': file_checksum,
         'fileCreatedAt': datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d %H:%M:%S"),
         'fileModifiedAt': datetime.datetime.fromtimestamp(os.path.getctime(file_path)).strftime("%Y-%m-%d %H:%M:%S"),
         'filename': filename,
@@ -91,14 +140,14 @@ def upload_file_to_immich(file_path):
     files = [('assetData', open(file_path, 'rb'))]
     headers = {
         'Accept': 'application/json',
-        'x-immich-checksum': sha1(file_path),
+        'x-immich-checksum': file_checksum,
     }
 
     response = send_immich_request('POST', 'assets', headers=headers, data=payload, files=files)
     os.remove(file_path)
 
     asset_id = response.json().get('id')
-    print(f"\r Uploaded   {filename}                          ")
+    print(f"\r  Uploaded   {filename}                          ")
     return asset_id
 
 
@@ -155,7 +204,7 @@ async def save_media(channel_id, name, is_create_album: bool):
     media_count = 0
 
     async for message in client.iter_messages(channel, limit=None):
-        if not message.media:
+        if not message.media or (not isinstance(message.media, MessageMediaPhoto) and not isinstance(message.media, MessageMediaDocument)):
             continue
 
         # Determine download folder by media type
@@ -163,8 +212,15 @@ async def save_media(channel_id, name, is_create_album: bool):
             path = 'downloads/photos/'
             media_type = 'photo'
         elif isinstance(message.media, MessageMediaDocument):
-            path = 'downloads/videos/'
-            media_type = 'video'
+            mime = message.media.document.mime_type or ''
+            if mime.startswith('video/'):
+                path = 'downloads/videos/'
+                media_type = 'video'
+            elif mime.startswith('image/'):
+                path = 'downloads/photos/'
+                media_type = 'photo'
+            else:
+                continue
         else:
             continue
 
@@ -219,7 +275,7 @@ async def list_channels(dialog_type):
         else:
             display_name = ' '.join(filter(None, [entity.first_name, entity.last_name]))
         _current_title = display_name
-        print(f"  {i:>3}.  {display_name}  (@{entity.username or 'no_username'})")
+        print(f"  {i:>3}.  {display_name}")
     print()
 
     choice = int(input('Select number: '))
@@ -266,5 +322,9 @@ async def main():
     print("\nDone!")
 
 
-with TelegramClient(session_name, api_id, api_hash) as client:
-    client.loop.run_until_complete(main())
+async def run():
+    global client
+    async with TelegramClient(session_name, api_id, api_hash) as client:
+        await main()
+
+asyncio.run(run())
