@@ -3,3 +3,4 @@ downloads
 .venv
 .idea
 *.session
+sessions/

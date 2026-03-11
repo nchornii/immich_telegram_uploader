@@ -1,0 +1,10 @@
+services:
+  app:
+    image: immich-telegram-uploader
+    build: .
+    env_file: .env
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./sessions:/app/sessions
+      - ./downloads:/app/downloads
