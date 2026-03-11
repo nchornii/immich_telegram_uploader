@@ -22,7 +22,7 @@ load_dotenv(dotenv_path)
 
 api_id = int(os.environ.get('APP_ID'))
 api_hash = os.environ.get('API_HASH')
-session_name = os.environ.get('SESSION_NAME')
+session_name = 'sessions/immich_telegram_uploader'
 immich_server_url = os.environ.get('IMMICH_API_URL')
 immich_api_key = os.environ.get('IMMICH_API_KEY')
 
