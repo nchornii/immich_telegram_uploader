@@ -52,6 +52,8 @@ Refer here for obtaining Immich API Key: https://immich.app/docs/features/comman
 1. Go to [my.telegram.org/apps](https://my.telegram.org/apps)
 2. Create an app and copy the `App api_id` and `App api_hash`
 
+Note: It can be a bit tricky to create app, telegram can return `ERROR` message. Referer to this [StackOverflow](https://stackoverflow.com/questions/38104560/telegram-api-create-new-application-error) question.
+
 ```env
 TELEGRAM_APP_ID=12345678
 TELEGRAM_API_HASH=your_telegram_api_hash
