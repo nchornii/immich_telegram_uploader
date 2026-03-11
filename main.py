@@ -200,6 +200,7 @@ async def save_media(channel_id, name, is_create_album: bool):
         album_id = create_album(name)
         print()
 
+    asset_ids = []
     media_count = 0
 
     async for message in client.iter_messages(channel, limit=None):
@@ -242,6 +243,8 @@ async def save_media(channel_id, name, is_create_album: bool):
 
         # Upload to Immich
         asset_id = upload_file_to_immich(file_path)
+        if asset_id:
+            asset_ids.append(asset_id)
 
         # Add asset to album after upload
         if is_create_album and album_id and asset_id:
@@ -252,6 +255,12 @@ async def save_media(channel_id, name, is_create_album: bool):
         print()
 
     print(f"Processed {media_count} media file(s).")
+
+    # Bulk-add all uploaded assets to the album
+    if is_create_album and album_id and asset_ids:
+        print(f"\nAdding {len(asset_ids)} asset(s) to album...")
+        add_assets_to_album(album_id, asset_ids)
+        print("Album updated.")
 
 
 # ──────────────────────────────────────────────
