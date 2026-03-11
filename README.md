@@ -2,54 +2,92 @@
 
 Downloads photos and videos from a Telegram chat or channel and uploads them to your self-hosted [Immich](https://immich.app) instance.
 
-## Requirements
+## Features
 
-- Python 3.9+
-- A [Telegram API app](https://my.telegram.org/apps)
-- A running Immich instance with an API key
+- Upload photos from any Telegram chat or channel to Immich
+- Upload videos from any Telegram chat or channel to Immich
+- Upload video notes from Telegram to Immich
+- Option to create Immich albums named after the Telegram chat or channel
+- Works with private chats and channels
+- Skips duplicate files using SHA-1 checksum verification
 
-## Installation
+**Check out demo: https://www.youtube.com/watch?v=dgAXLGZ3uks**
 
-```bash
-git clone <repo-url>
-cd PythonProject
+## 🚀 Getting Started
 
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+### Method 1 — 🐳 Docker Compose (Recommended)
 
-pip install -r requirements.txt
+Add the following service to your existing Immich `docker-compose.yml`. Make sure it's on the same Docker network as Immich.
+
+See the sample [docker-compose-all-immich.yml](./docker-compose-all-immich.yml) file for reference.
+
+
+```yaml
+services:
+  # Other immich services...
+  immich-telegram-uploader:
+    container_name: immich_telegram_uploader
+    image: ghcr.io/nchornii/immich_telegram_uploader:latest
+    environment:
+      TELEGRAM_APP_ID: `${TELEGRAM_APP_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      IMMICH_API_URL: ${IMMICH_API_URL}
+      IMMICH_API_KEY: ${IMMICH_API_KEY}
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./sessions:/app/sessions
+      - ./downloads:/app/downloads
 ```
 
-## Configuration
-
-Copy the example env file and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```env
-APP_ID=12345678
-API_HASH=your_telegram_api_hash
-SESSION_NAME=my_session
-IMMICH_API_URL=http://192.168.1.10:2283
-IMMICH_API_KEY=your_immich_api_key
-```
-
-**Getting Telegram credentials:**
-1. Go to [my.telegram.org/apps](https://my.telegram.org/apps)
-2. Create an app and copy the `App api_id` and `App api_hash`
+Fill in your `.env` file:
 
 **Getting Immich API key:**
 1. Open Immich → Account Settings → API Keys
 2. Create a new key and copy it
 
+Refer here for obtaining Immich API Key: https://immich.app/docs/features/command-line-interface#obtain-the-api-key
+
+**Getting Telegram credentials:**
+1. Go to [my.telegram.org/apps](https://my.telegram.org/apps)
+2. Create an app and copy the `App api_id` and `App api_hash`
+
+```env
+TELEGRAM_APP_ID=12345678
+TELEGRAM_API_HASH=your_telegram_api_hash
+IMMICH_API_URL=http://immich-server:2283
+IMMICH_API_KEY=your_immich_api_key
+```
+
+Then authenticate once:
+
+```bash
+docker exec -it immich_telegram_uploader python3 main.py
+```
+
+After the first login, the session is saved and you can re-run the command without re-authenticating.
+
+---
+
+### Method 2 — 🔧 Local Build
+
+Clone the repo and build the image locally:
+
+```bash
+docker compose -f docker-compose.build.yml up -d
+```
+
+Then authenticate:
+
+```bash
+docker exec -it immich_telegram_uploader python3 main.py
+```
+---
+
 ## Running
 
 ```bash
-python3 main.py
+docker exec -it immich_telegram_uploader python3 main.py
 ```
 
 On the first run, Telethon will ask for your phone number and a confirmation code sent via Telegram. After that, the session is saved locally and you won't need to authenticate again.
