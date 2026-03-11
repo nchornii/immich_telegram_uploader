@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/nchornii/immich_telegram_uploader__1
+    container_name: immich_telegram_uploader
     build: .
     env_file: .env
     stdin_open: true
