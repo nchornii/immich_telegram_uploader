@@ -29,7 +29,7 @@ services:
     container_name: immich_telegram_uploader
     image: ghcr.io/nchornii/immich_telegram_uploader:latest
     environment:
-      TELEGRAM_APP_ID: `${TELEGRAM_APP_ID}
+      TELEGRAM_APP_ID: ${TELEGRAM_APP_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
       IMMICH_API_URL: ${IMMICH_API_URL}
       IMMICH_API_KEY: ${IMMICH_API_KEY}
