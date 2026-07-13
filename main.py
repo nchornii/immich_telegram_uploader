@@ -1,7 +1,11 @@
 import asyncio
 import hashlib
 import os
+import shutil
+import signal
+import sqlite3
 import sys
+import time
 import warnings
 from os.path import join, dirname
 
@@ -10,11 +14,19 @@ warnings.filterwarnings('ignore', message='.*NotOpenSSLWarning.*')
 warnings.filterwarnings('ignore', category=Warning, module='urllib3')
 warnings.filterwarnings('ignore', message='Using async sessions support is an experimental feature')
 from telethon import TelegramClient
-from telethon.tl.types import User, Channel, MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import User, Chat, Channel, MessageMediaPhoto, MessageMediaDocument
 from dotenv import load_dotenv
 from urllib.parse import urlparse
 import requests
 import datetime
+
+# Intercept Ctrl+Z (SIGTSTP) to exit cleanly instead of suspending,
+# preventing the SQLite session database from remaining locked.
+def _handle_sigtstp(signum, frame):
+    print("\n\nExiting...")
+    sys.exit(0)
+
+signal.signal(signal.SIGTSTP, _handle_sigtstp)
 
 # Load environment variables from .env file
 dotenv_path = join(dirname(__file__), '.env')
@@ -77,10 +89,12 @@ def create_album(name):
     return new_album['id']
 
 
-def add_assets_to_album(album_id, asset_id):
-    """Add a list of asset IDs to an album."""
-    payload = {'assetIds': [asset_id], 'albumIds': [album_id]}
-    return send_immich_request('PUT', 'albums/assets', json=payload).json()
+def add_assets_to_album(album_id, asset_ids):
+    """Add asset IDs to an album. Accepts a single ID string or a list of IDs."""
+    if isinstance(asset_ids, str):
+        asset_ids = [asset_ids]
+    payload = {'ids': asset_ids}
+    return send_immich_request('PUT', f'albums/{album_id}/assets', json=payload).json()
 
 
 def check_asset_exists(file_checksum):
@@ -130,20 +144,36 @@ def upload_file_to_immich(file_path):
     file_size = os.path.getsize(file_path)
     print(f"  Uploading  {filename} ({_human_size(file_size)})...", end='', flush=True)
 
+    # Map common extensions to MIME types for proper Immich handling
+    mime_map = {
+        '.heic': 'image/heic', '.heif': 'image/heif',
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.png': 'image/png', '.gif': 'image/gif',
+        '.webp': 'image/webp', '.tiff': 'image/tiff', '.tif': 'image/tiff',
+        '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+        '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska',
+        '.webm': 'video/webm',
+    }
+    content_type = mime_map.get(ext, 'application/octet-stream')
+
     payload = {
         'deviceId': 'telegram-uploader',
         'deviceAssetId': file_checksum,
-        'fileCreatedAt': datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d %H:%M:%S"),
-        'fileModifiedAt': datetime.datetime.fromtimestamp(os.path.getctime(file_path)).strftime("%Y-%m-%d %H:%M:%S"),
+        'fileCreatedAt': datetime.datetime.fromtimestamp(os.path.getmtime(file_path), tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        'fileModifiedAt': datetime.datetime.fromtimestamp(os.path.getctime(file_path), tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         'filename': filename,
     }
-    files = [('assetData', open(file_path, 'rb'))]
+    file_handle = open(file_path, 'rb')
+    files = [('assetData', (filename, file_handle, content_type))]
     headers = {
         'Accept': 'application/json',
         'x-immich-checksum': file_checksum,
     }
 
-    response = send_immich_request('POST', 'assets', headers=headers, data=payload, files=files)
+    try:
+        response = send_immich_request('POST', 'assets', headers=headers, data=payload, files=files)
+    finally:
+        file_handle.close()
     os.remove(file_path)
 
     asset_id = response.json().get('id')
@@ -318,7 +348,7 @@ async def main():
     choice = input("\nChoose source:\n  1 - Private Chats\n  2 - Channels\nYour choice: ")
 
     if choice == '1':
-        dialog_type = User
+        dialog_type = (User, Chat)
     elif choice == '2':
         dialog_type = Channel
     else:
@@ -331,6 +361,69 @@ async def main():
 async def run():
     global client
     async with TelegramClient(session_name, api_id, api_hash) as client:
-        await main()
+        try:
+            await main()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\nExiting...")
 
-asyncio.run(run())
+
+def _unlock_session_db():
+    """Ensure the session DB is not locked before starting Telethon.
+
+    This handles the case where a previous process was killed/suspended
+    without closing the database properly (e.g. Ctrl+Z in a container).
+    """
+    session_file = session_name + '.session'
+    if not os.path.exists(session_file):
+        return
+
+    def _is_writable():
+        """Test with a WRITE operation — reads can succeed even with a write lock."""
+        try:
+            conn = sqlite3.connect(session_file, timeout=1)
+            conn.execute('BEGIN IMMEDIATE')  # Acquires a write lock
+            conn.execute('ROLLBACK')
+            conn.close()
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    if _is_writable():
+        return
+
+    print("Session database is locked. Rebuilding session file...")
+
+    # Force recovery by copying data to a new file (new inode = no POSIX flock)
+    tmp_file = session_file + '.tmp'
+    try:
+        shutil.copy2(session_file, tmp_file)
+        os.remove(session_file)
+        # Remove any leftover journal files from the original
+        for suffix in ('-wal', '-shm', '-journal'):
+            f = session_file + suffix
+            if os.path.exists(f):
+                os.remove(f)
+        os.rename(tmp_file, session_file)
+
+        if _is_writable():
+            print("  Session file rebuilt successfully.")
+        else:
+            raise RuntimeError("Database still locked after rebuild")
+    except Exception as e:
+        # Last resort: delete everything
+        print(f"  Rebuild failed ({e}). Deleting session file...")
+        for f in [session_file, tmp_file]:
+            if os.path.exists(f):
+                os.remove(f)
+        for suffix in ('-wal', '-shm', '-journal'):
+            f = session_file + suffix
+            if os.path.exists(f):
+                os.remove(f)
+        print("  Session file removed. You will need to re-authenticate.")
+
+
+try:
+    _unlock_session_db()
+    asyncio.run(run())
+except (KeyboardInterrupt, EOFError):
+    print("\n\nExiting...")
