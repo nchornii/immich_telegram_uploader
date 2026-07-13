@@ -4,3 +4,4 @@ downloads
 .idea
 *.session
 sessions/
+.DS_Store
